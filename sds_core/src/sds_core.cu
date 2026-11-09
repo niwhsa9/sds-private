@@ -31,7 +31,7 @@ Tensor<float, 2> sds::keep_tape_after_time(
   return result;
 }
 
-Tensor<float, 3> sds::compute_tvlqr_gains(
+std::pair<Tensor<float, 3>, Tensor<float, 3>> sds::compute_tvlqr_gains(
     const TensorView<float, 3>& A, const TensorView<float, 3>& B,
     const TensorView<float, 2>& Q, const TensorView<float, 2>& Qf,
     const TensorView<float, 2>& R, float dt, bool discretize)
@@ -72,6 +72,8 @@ Tensor<float, 3> sds::compute_tvlqr_gains(
 
   // Output remains float.
   Tensor<float, 3> K(Memory::Host, N, nX, nU);
+  Tensor<float, 3> Ps(Memory::Host, N + 1, nX, nX);
+  Eigen::Map<FloatRowMajMatX>(Ps.slice<0>(N).data(), nX, nX) = Qf_float;
 
   MatX P = Qf_eig;
 
@@ -108,9 +110,11 @@ Tensor<float, 3> sds::compute_tvlqr_gains(
     P = Ak.transpose() * (P - P * Bk * BtPB.inverse() * Bk.transpose() * P) *
             Ak +
         Q_eig * dt_d;
+    Eigen::Map<FloatRowMajMatX>(Ps.slice<0>(i).data(), nX, nX) =
+        P.cast<float>();
   }
 
-  return K;
+  return {std::move(K), std::move(Ps)};
 }
 
 // Tensor<float, 3> sds::compute_tvlqr_gains(
