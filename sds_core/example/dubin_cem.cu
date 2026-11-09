@@ -154,11 +154,12 @@ int main()
   LQR_Q.set_diag({0.1f, 0.1f, 0.1f});
   auto [As, Bs] = sds::get_linearized_trajectory(
       dubins_car, nominal_traj_x.view().squeeze(), tape.view(), dt);
-  auto Ks = sds::compute_tvlqr_gains(
+  auto [Ks, Ps] = sds::compute_tvlqr_gains(
       As, Bs, LQR_Q.view(), LQR_Qf.view(), LQR_R.view(), dt);
   auto nominal_traj_2d = nominal_traj_x.clone().squeeze();
   sds::LinearPolicy lqr_policy(
-      std::move(Ks), std::move(nominal_traj_2d), std::move(tape), 0.0, dt);
+      std::move(Ks), std::move(Ps), std::move(nominal_traj_2d),
+      std::move(tape), 0.0, dt);
 
   // Simulate with perturbed initial condition
   Tensor<float, 1> x_perturb(3);

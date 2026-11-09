@@ -22,24 +22,26 @@ Tensor<float, 2> keep_tape_after_time(
 struct LinearPolicy
 {
   Tensor<float, 3> K;          // N x nx x nu row major
+  Tensor<float, 3> P;          // (N+1) x nx x nx row-major cost-to-go matrices
   Tensor<float, 2> x_nominal;  // N x nx row major
   Tensor<float, 2> u_nominal;  // N x nu row major
   double start_time, dt;
   int nX, nU;
 
   LinearPolicy(
-      Tensor<float, 3>&& K_, Tensor<float, 2>&& x_nominal_,
-      Tensor<float, 2>&& u_nominal_, double start_time_, double dt_)
-      : K(std::move(K_)), x_nominal(std::move(x_nominal_)),
+      Tensor<float, 3>&& K_, Tensor<float, 3>&& P_,
+      Tensor<float, 2>&& x_nominal_, Tensor<float, 2>&& u_nominal_,
+      double start_time_, double dt_)
+      : K(std::move(K_)), P(std::move(P_)), x_nominal(std::move(x_nominal_)),
         u_nominal(std::move(u_nominal_)), start_time(start_time_), dt(dt_),
         nX(x_nominal.shape(1)), nU(u_nominal.shape(1))
   {
   }
 
   LinearPolicy(const LinearPolicy& other)
-      : K(other.K.clone()), x_nominal(other.x_nominal.clone()),
-        u_nominal(other.u_nominal.clone()), start_time(other.start_time),
-        dt(other.dt), nX(other.nX), nU(other.nU)
+      : K(other.K.clone()), P(other.P.clone()),
+        x_nominal(other.x_nominal.clone()), u_nominal(other.u_nominal.clone()),
+        start_time(other.start_time), dt(other.dt), nX(other.nX), nU(other.nU)
   {
   }
 
@@ -49,6 +51,7 @@ struct LinearPolicy
     if (this != &other)
     {
       K = other.K.clone();
+      P = other.P.clone();
       x_nominal = other.x_nominal.clone();
       u_nominal = other.u_nominal.clone();
 
@@ -66,14 +69,52 @@ struct LinearPolicy
     if (!(dt > 0.0) || !std::isfinite(dt) || !std::isfinite(t) ||
         !std::isfinite(start_time))
       throw std::runtime_error("Invalid policy time or timestep");
-    const double step_value = std::floor((t - start_time) / dt);
+    double step_value = std::floor((t - start_time) / dt);
+    // if (step_value < 0 || step_value >= u_nominal.shape(0) ||
+    //     step_value >= K.shape(0) || step_value >= x_nominal.shape(0))
+    //   throw std::runtime_error("Time t is out of bounds for policy
+    //   evaluation");
+
     if (step_value < 0 || step_value >= u_nominal.shape(0) ||
         step_value >= K.shape(0) || step_value >= x_nominal.shape(0))
-      throw std::runtime_error("Time t is out of bounds for policy evaluation");
+    {
+      std::cerr << "Warning: time t is out of bounds for policy evaluation, "
+                   "returning 0"
+                << std::endl;
+      // return 0
+      Tensor<float, 1> result(nU);
+      result.fill(0.0);
+      return result;
+    }
+
     const int step = static_cast<int>(step_value);
 
     // u = u_nominal[step] + K[step] * (x - x_nominal[step])
-    Eigen::Map<const Eigen::VectorXf> x_eigen(x, nX);
+    // Eigen::Map<const Eigen::VectorXf> x_eigen(x, nX);
+
+    Eigen::VectorXf x_eigen = Eigen::VectorXf::Map(x, nX);
+    // TODO(AMG) bad, bad bad
+    // check states 3-6
+    float dist1 = std::sqrt(
+        std::pow(x_eigen(3) - x_nominal(step, 3), 2) +
+        std::pow(x_eigen(4) - x_nominal(step, 4), 2) +
+        std::pow(x_eigen(5) - x_nominal(step, 5), 2) +
+        std::pow(x_eigen(6) - x_nominal(step, 6), 2));
+
+    float dist2 = std::sqrt(
+        std::pow(-x_eigen(3) - x_nominal(step, 3), 2) +
+        std::pow(-x_eigen(4) - x_nominal(step, 4), 2) +
+        std::pow(-x_eigen(5) - x_nominal(step, 5), 2) +
+        std::pow(-x_eigen(6) - x_nominal(step, 6), 2));
+    if (dist2 < dist1)
+    {
+      // std::cout << "flipping sign of states 3-6" << std::endl;
+      x_eigen(3) *= -1.0f;
+      x_eigen(4) *= -1.0f;
+      x_eigen(5) *= -1.0f;
+      x_eigen(6) *= -1.0f;
+    }
+
     Eigen::Map<const Eigen::VectorXf> x_nom(
         x_nominal.slice_1d<1>(step).data(), nX);
     Eigen::Map<const Eigen::VectorXf> u_nom(
@@ -133,7 +174,9 @@ std::pair<Tensor<float, 2>, Tensor<float, 2>> simulate_plant_with_policy(
 // Returns K: N x nX x nU, laid out so that (per the LinearPolicy convention)
 // K.slice<0>(i) reinterpreted col-major as (nU, nX) gives the actual gain
 // matrix u = u_nom + K_i * (x - x_nom).
-Tensor<float, 3> compute_tvlqr_gains(
+// Also returns P: (N+1) x nX x nX row-major, with P[N] = Qf and
+// local quadratic cost-to-go dx^T P[i] dx at state knot i.
+std::pair<Tensor<float, 3>, Tensor<float, 3>> compute_tvlqr_gains(
     const TensorView<float, 3>& A, const TensorView<float, 3>& B,
     const TensorView<float, 2>& Q, const TensorView<float, 2>& Qf,
     const TensorView<float, 2>& R, float dt, bool discretize = true);
@@ -146,11 +189,13 @@ std::pair<Tensor<float, 3>, Tensor<float, 3>> get_linearized_trajectory(
   const int N = u_traj.shape(0);
   const int nX = system.get_n_x();
   const int nU = system.get_n_u();
-  if (N <= 0 || x_traj.shape(0) != N + 1 ||
-      x_traj.shape(1) != nX || u_traj.shape(1) != nU)
-    throw std::runtime_error("Expected N controls and N+1 states with matching system dimensions");
+  if (N <= 0 || x_traj.shape(0) != N + 1 || x_traj.shape(1) != nX ||
+      u_traj.shape(1) != nU)
+    throw std::runtime_error(
+        "Expected N controls and N+1 states with matching system dimensions");
   if (!(dt > 0.0f) || !std::isfinite(dt))
-    throw std::runtime_error("Linearization timestep must be finite and positive");
+    throw std::runtime_error(
+        "Linearization timestep must be finite and positive");
 
   Tensor<float, 3> A(N, nX, nX);
   Tensor<float, 3> B(N, nX, nU);
@@ -201,6 +246,30 @@ std::pair<Tensor<float, 2>, Tensor<float, 2>> zoh_reroll(
           .squeeze();
 
   return {std::move(x_traj_reroll), std::move(u_traj)};
+}
+
+// Arbitrary coarse timestep: sample ZOH controls on the fine physical-time
+// grid, rather than rounding old_dt/new_dt separately for every interval.
+// The final interval pads the duration by less than one fine timestep.
+std::pair<Tensor<float, 2>, Tensor<float, 2>> zoh_reroll_variable_time(
+    RolloutProvider<float> auto& plant, const TensorView<float, 2>& u_orig,
+    const TensorView<float, 1>& x0, double old_dt, double new_dt)
+{
+  if (!std::isfinite(old_dt) || !std::isfinite(new_dt) || old_dt <= 0.0 ||
+      new_dt <= 0.0 || u_orig.shape(0) < 1)
+    throw std::invalid_argument(
+        "Invalid variable-time reroll horizon or timestep");
+  int steps = static_cast<int>(std::ceil(u_orig.shape(0) * old_dt / new_dt));
+  Tensor<float, 2> u_fine(steps, u_orig.shape(1));
+  for (int k = 0; k < steps; ++k)
+  {
+    int source = std::min(
+        static_cast<int>(std::floor(k * new_dt / old_dt)), u_orig.shape(0) - 1);
+    u_fine.slice_1d<1>(k).deep_copy_from(u_orig.slice_1d<1>(source));
+  }
+  auto x_fine = plant(x0, u_fine.view().unsqueeze(), static_cast<float>(new_dt))
+                    .squeeze();
+  return {std::move(x_fine), std::move(u_fine)};
 }
 
 Tensor<float, 2> decimate_trajectory(
