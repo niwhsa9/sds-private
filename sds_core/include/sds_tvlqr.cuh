@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "sds_core.cuh"
+#include "sds_lqr.cuh"
 #include "tensor.cuh"
 
 namespace sds
@@ -25,6 +26,7 @@ struct LinearPolicy
   Tensor<float, 3> P;          // (N+1) x nx x nx row-major cost-to-go matrices
   Tensor<float, 2> x_nominal;  // N x nx row major
   Tensor<float, 2> u_nominal;  // N x nu row major
+  std::optional<InfiniteHorizonPolicy> terminal_policy;
   double start_time, dt;
   int nX, nU;
 
@@ -41,7 +43,8 @@ struct LinearPolicy
   LinearPolicy(const LinearPolicy& other)
       : K(other.K.clone()), P(other.P.clone()),
         x_nominal(other.x_nominal.clone()), u_nominal(other.u_nominal.clone()),
-        start_time(other.start_time), dt(other.dt), nX(other.nX), nU(other.nU)
+        terminal_policy(other.terminal_policy), start_time(other.start_time),
+        dt(other.dt), nX(other.nX), nU(other.nU)
   {
   }
 
@@ -55,6 +58,7 @@ struct LinearPolicy
       x_nominal = other.x_nominal.clone();
       u_nominal = other.u_nominal.clone();
 
+      terminal_policy = other.terminal_policy;
       start_time = other.start_time;
       dt = other.dt;
       nX = other.nX;
@@ -69,6 +73,13 @@ struct LinearPolicy
     if (!(dt > 0.0) || !std::isfinite(dt) || !std::isfinite(t) ||
         !std::isfinite(start_time))
       throw std::runtime_error("Invalid policy time or timestep");
+    if (terminal_policy && t >= start_time + u_nominal.shape(0) * dt)
+    {
+      if (terminal_policy->x_reference.shape(0) != nX ||
+          terminal_policy->u_reference.shape(0) != nU)
+        throw std::invalid_argument("Terminal policy dimensions do not match tape");
+      return terminal_policy->eval_policy(x);
+    }
     double step_value = std::floor((t - start_time) / dt);
     // if (step_value < 0 || step_value >= u_nominal.shape(0) ||
     //     step_value >= K.shape(0) || step_value >= x_nominal.shape(0))

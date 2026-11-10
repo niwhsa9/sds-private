@@ -207,3 +207,78 @@ Tensor<float, 2> sds::decimate_trajectory(
 
   return x_decimated;
 }
+
+std::pair<Tensor<float, 2>, Tensor<float, 2>> sds::compute_infinite_horizon_lqr_gains(
+    const TensorView<float, 2>& A, const TensorView<float, 2>& B,
+    const TensorView<float, 2>& Q, const TensorView<float, 2>& R, float dt,
+    bool discretize, double tolerance, int max_iterations)
+{
+  const int nx = A.shape(0), nu = B.shape(1);
+  if (nx <= 0 || nu <= 0 || A.shape(1) != nx || B.shape(0) != nx ||
+      Q.shape(0) != nx || Q.shape(1) != nx ||
+      R.shape(0) != nu || R.shape(1) != nu)
+    throw std::invalid_argument("Infinite-horizon LQR dimension mismatch");
+  if (!(dt > 0) || !std::isfinite(dt) || !(tolerance > 0) ||
+      !std::isfinite(tolerance) || max_iterations <= 0)
+    throw std::invalid_argument("Invalid infinite-horizon LQR solver options");
+  using Mat = Eigen::MatrixXd;
+  auto read = [](const TensorView<float, 2>& tensor)
+  {
+    Mat matrix(tensor.shape(0), tensor.shape(1));
+    for (int i = 0; i < tensor.shape(0); ++i)
+      for (int j = 0; j < tensor.shape(1); ++j) matrix(i, j) = tensor(i, j);
+    if (!matrix.allFinite()) throw std::invalid_argument("Nonfinite LQR matrix");
+    return matrix;
+  };
+  Mat Ad = read(A), Bd = read(B), Qd = read(Q), Rd = read(R);
+  if (!Qd.isApprox(Qd.transpose(), 1e-7) || !Rd.isApprox(Rd.transpose(), 1e-7))
+    throw std::invalid_argument("LQR costs must be symmetric");
+  Qd = (0.5 * (Qd + Qd.transpose())).eval();
+  Rd = (0.5 * (Rd + Rd.transpose())).eval();
+  Eigen::SelfAdjointEigenSolver<Mat> qe(Qd), re(Rd);
+  if (qe.info() != Eigen::Success || re.info() != Eigen::Success ||
+      qe.eigenvalues().minCoeff() < -1e-12 || re.eigenvalues().minCoeff() <= 0)
+    throw std::invalid_argument("LQR requires Q positive semidefinite and R positive definite");
+  if (discretize)
+  {
+    Ad = (Mat::Identity(nx, nx) + double(dt) * Ad).eval();
+    Bd *= double(dt);
+  }
+  Qd *= double(dt);
+  Rd *= double(dt);
+  Mat P = Qd, gain;
+  bool converged = false;
+  auto feedback = [&](const Mat& p) -> Mat
+  {
+    Mat S = Rd + Bd.transpose() * p * Bd;
+    Eigen::LDLT<Mat> factor(S);
+    if (factor.info() != Eigen::Success || !factor.isPositive())
+      throw std::runtime_error("LQR Riccati factorization failed");
+    return -factor.solve(Bd.transpose() * p * Ad);
+  };
+  for (int iteration = 0; iteration < max_iterations; ++iteration)
+  {
+    gain = feedback(P);
+    Mat next = Qd + Ad.transpose() * P * Ad + Ad.transpose() * P * Bd * gain;
+    next = (0.5 * (next + next.transpose())).eval();
+    if (!next.allFinite()) throw std::runtime_error("LQR Riccati iteration diverged");
+    converged = (next - P).norm() <= tolerance * std::max(1.0, next.norm());
+    P = std::move(next);
+    if (converged) break;
+  }
+  if (!converged) throw std::runtime_error("Infinite-horizon LQR did not converge");
+  gain = feedback(P);
+  // Check the gain actually returned to the float-based policy.
+  Mat stored_gain = gain.cast<float>().cast<double>();
+  Eigen::EigenSolver<Mat> poles(Ad + Bd * stored_gain, false);
+  if (!stored_gain.allFinite() || poles.info() != Eigen::Success ||
+      poles.eigenvalues().cwiseAbs().maxCoeff() >= 1.0)
+    throw std::runtime_error("Infinite-horizon LQR solution is not stabilizing");
+  Tensor<float, 2> K(Memory::Host, nx, nu), result_P(Memory::Host, nx, nx);
+  for (int i = 0; i < nx; ++i)
+  {
+    for (int j = 0; j < nu; ++j) K(i, j) = stored_gain(j, i);
+    for (int j = 0; j < nx; ++j) result_P(i, j) = static_cast<float>(P(i, j));
+  }
+  return {std::move(K), std::move(result_P)};
+}

@@ -6,7 +6,7 @@ enable_language(CUDA)
 set(CMAKE_CUDA_STANDARD 20)
 
 
-find_package(Eigen3)
+find_package(Eigen3 REQUIRED)
 #set(CMAKE_CXX_STANDARD 20)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -21,8 +21,8 @@ target_include_directories(sds_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-        $<BUILD_INTERFACE:${EIGEN3_INCLUDE_DIR}>
 )
+target_link_libraries(sds_core PUBLIC Eigen3::Eigen)
 #target_link_libraries(sds_core INTERFACE cublas)
 
 set_target_properties(sds_core PROPERTIES
@@ -118,3 +118,9 @@ target_compile_options(dubin_cem PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-l
 #    message(WARNING "PYI file ${PYI_FILE} not found, skipping installation")
 #endif()
 #
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(infinite_horizon_lqr_test test/infinite_horizon_lqr.cu)
+  target_link_libraries(infinite_horizon_lqr_test sds_core)
+  add_test(NAME infinite_horizon_lqr COMMAND infinite_horizon_lqr_test)
+endif()
