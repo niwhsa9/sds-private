@@ -101,6 +101,25 @@ int main()
   float state[] = {1};
   check(fallback.eval_policy(state)(0) == -0.25f, "Input saturation");
 
+  // Nonlinear error coordinates are evaluated before applying the same gain.
+  fallback.u_lower.reset();
+  fallback.x_reference(0) = 0.25f;
+  fallback.state_error = [](const float* current, const float* reference)
+  {
+    Eigen::VectorXf error(1);
+    error(0) = 2.0f * (current[0] - reference[0]);
+    return error;
+  };
+  check(std::abs(fallback.eval_policy(state)(0) + 0.61803398875f * 1.5f) < 1e-6f,
+        "Nonlinear error callback must receive reference and drive feedback");
+  fallback.state_error = [](const float*, const float*)
+  { return Eigen::VectorXf::Zero(2).eval(); };
+  rejects([&] { fallback.eval_policy(state); });
+  fallback.state_error = {};
+  fallback.x_reference(0) = 0;
+  fallback.u_lower.emplace(Memory::Host, 1);
+  (*fallback.u_lower)(0) = -0.25;
+
   // One-state policy also proves the fallback bypasses legacy quaternion
   // handling, which is specific to the finite tape's current implementation.
   Tensor<float, 3> kt(Memory::Host, 2, 1, 1), pt(Memory::Host, 3, 1, 1);

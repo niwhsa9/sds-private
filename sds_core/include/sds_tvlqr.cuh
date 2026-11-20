@@ -1,6 +1,8 @@
 #pragma once
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <cmath>
+#include <limits>
 
 #include "sds_core.cuh"
 #include "sds_lqr.cuh"
@@ -29,6 +31,8 @@ struct LinearPolicy
   std::optional<InfiniteHorizonPolicy> terminal_policy;
   double start_time, dt;
   int nX, nU;
+  // Interpolate gains and nominal references in time; false keeps ZOH lookup.
+  bool interpolate_policy = false;
 
   LinearPolicy(
       Tensor<float, 3>&& K_, Tensor<float, 3>&& P_,
@@ -44,7 +48,8 @@ struct LinearPolicy
       : K(other.K.clone()), P(other.P.clone()),
         x_nominal(other.x_nominal.clone()), u_nominal(other.u_nominal.clone()),
         terminal_policy(other.terminal_policy), start_time(other.start_time),
-        dt(other.dt), nX(other.nX), nU(other.nU)
+        dt(other.dt), nX(other.nX), nU(other.nU),
+        interpolate_policy(other.interpolate_policy)
   {
   }
 
@@ -63,13 +68,14 @@ struct LinearPolicy
       dt = other.dt;
       nX = other.nX;
       nU = other.nU;
+      interpolate_policy = other.interpolate_policy;
     }
     return *this;
   }
 
   Tensor<float, 1> eval_policy(double t, const float* x) const
   {
-    // ZOH: clamp to step_lower
+    // Locate the lower knot; preserve terminal fallback and expiry behavior.
     if (!(dt > 0.0) || !std::isfinite(dt) || !std::isfinite(t) ||
         !std::isfinite(start_time))
       throw std::runtime_error("Invalid policy time or timestep");
@@ -77,7 +83,8 @@ struct LinearPolicy
     {
       if (terminal_policy->x_reference.shape(0) != nX ||
           terminal_policy->u_reference.shape(0) != nU)
-        throw std::invalid_argument("Terminal policy dimensions do not match tape");
+        throw std::invalid_argument(
+            "Terminal policy dimensions do not match tape");
       return terminal_policy->eval_policy(x);
     }
     double step_value = std::floor((t - start_time) / dt);
@@ -99,6 +106,33 @@ struct LinearPolicy
     }
 
     const int step = static_cast<int>(step_value);
+    const float w = static_cast<float>((t - start_time) / dt - step_value);
+    Eigen::VectorXf x_nom =
+        Eigen::VectorXf::Map(x_nominal.slice_1d<1>(step).data(), nX);
+    Eigen::VectorXf u_nom =
+        Eigen::VectorXf::Map(u_nominal.slice_1d<1>(step).data(), nU);
+    if (interpolate_policy)
+    {
+      const int next_x = std::min(step + 1, x_nominal.shape(0) - 1);
+      const int next_u = std::min(step + 1, u_nominal.shape(0) - 1);
+      Eigen::Map<const Eigen::VectorXf> x_next(
+          x_nominal.slice_1d<1>(next_x).data(), nX);
+      Eigen::Map<const Eigen::VectorXf> u_next(
+          u_nominal.slice_1d<1>(next_u).data(), nU);
+      // Aircraft attitude is stored as [w,x,y,z] at state indices 3:7.
+      Eigen::Quaternionf q0(x_nom(3), x_nom(4), x_nom(5), x_nom(6));
+      Eigen::Quaternionf q1(x_next(3), x_next(4), x_next(5), x_next(6));
+      if (!q0.coeffs().allFinite() || !q1.coeffs().allFinite() ||
+          q0.norm() == 0.0f || q1.norm() == 0.0f)
+        throw std::invalid_argument("Invalid nominal attitude quaternion");
+      q0.normalize();
+      q1.normalize();
+      if (q0.dot(q1) < 0.0f) q1.coeffs() *= -1.0f;
+      Eigen::Quaternionf q = q0.slerp(w, q1).normalized();
+      x_nom = (1.0f - w) * x_nom + w * x_next;
+      x_nom.segment<4>(3) << q.w(), q.x(), q.y(), q.z();
+      u_nom = (1.0f - w) * u_nom + w * u_next;
+    }
 
     // u = u_nominal[step] + K[step] * (x - x_nominal[step])
     // Eigen::Map<const Eigen::VectorXf> x_eigen(x, nX);
@@ -107,16 +141,16 @@ struct LinearPolicy
     // TODO(AMG) bad, bad bad
     // check states 3-6
     float dist1 = std::sqrt(
-        std::pow(x_eigen(3) - x_nominal(step, 3), 2) +
-        std::pow(x_eigen(4) - x_nominal(step, 4), 2) +
-        std::pow(x_eigen(5) - x_nominal(step, 5), 2) +
-        std::pow(x_eigen(6) - x_nominal(step, 6), 2));
+        std::pow(x_eigen(3) - x_nom(3), 2) +
+        std::pow(x_eigen(4) - x_nom(4), 2) +
+        std::pow(x_eigen(5) - x_nom(5), 2) +
+        std::pow(x_eigen(6) - x_nom(6), 2));
 
     float dist2 = std::sqrt(
-        std::pow(-x_eigen(3) - x_nominal(step, 3), 2) +
-        std::pow(-x_eigen(4) - x_nominal(step, 4), 2) +
-        std::pow(-x_eigen(5) - x_nominal(step, 5), 2) +
-        std::pow(-x_eigen(6) - x_nominal(step, 6), 2));
+        std::pow(-x_eigen(3) - x_nom(3), 2) +
+        std::pow(-x_eigen(4) - x_nom(4), 2) +
+        std::pow(-x_eigen(5) - x_nom(5), 2) +
+        std::pow(-x_eigen(6) - x_nom(6), 2));
     if (dist2 < dist1)
     {
       // std::cout << "flipping sign of states 3-6" << std::endl;
@@ -126,13 +160,16 @@ struct LinearPolicy
       x_eigen(6) *= -1.0f;
     }
 
-    Eigen::Map<const Eigen::VectorXf> x_nom(
-        x_nominal.slice_1d<1>(step).data(), nX);
-    Eigen::Map<const Eigen::VectorXf> u_nom(
-        u_nominal.slice_1d<1>(step).data(), nU);
     Eigen::Map<const Eigen::MatrixXf> K_step(K.slice<0>(step).data(), nU, nX);
 
     Eigen::VectorXf u = u_nom + K_step * (x_eigen - x_nom);
+    if (interpolate_policy && step + 1 < K.shape(0) &&
+        step + 1 < u_nominal.shape(0))
+    {
+      Eigen::Map<const Eigen::MatrixXf> K_next(
+          K.slice<0>(step + 1).data(), nU, nX);
+      u.noalias() += w * (K_next - K_step) * (x_eigen - x_nom);
+    }
 
     Tensor<float, 1> result(nU);
     std::memcpy(result.data(), u.data(), nU * sizeof(float));
@@ -227,6 +264,52 @@ std::pair<Tensor<float, 3>, Tensor<float, 3>> get_linearized_trajectory(
   return {std::move(A), std::move(B)};
 }
 
+// Roll out once on the coarse grid, then linearly interpolate states and
+// controls at new_dt. State components (including quaternions) are treated
+// independently. Controls hold their last knot; the terminal state is held
+// over any final padding (less than one new_dt) for non-integer ratios.
+std::pair<Tensor<float, 2>, Tensor<float, 2>> linear_interpolate_rollout(
+    RolloutProvider<float> auto& plant, const TensorView<float, 2>& u_orig,
+    const TensorView<float, 1>& x0, double old_dt, double new_dt)
+{
+  if (!std::isfinite(old_dt) || !std::isfinite(new_dt) || old_dt <= 0.0 ||
+      new_dt <= 0.0 || u_orig.shape(0) < 1)
+    throw std::invalid_argument(
+        "Invalid interpolation horizon or timestep");
+  const int N = u_orig.shape(0);
+  const double steps_needed = std::ceil(N * old_dt / new_dt);
+  if (!std::isfinite(steps_needed) ||
+      steps_needed >= std::numeric_limits<int>::max())
+    throw std::invalid_argument("Interpolated trajectory is too long");
+  const int steps = std::max(1, static_cast<int>(steps_needed));
+  auto x_orig = plant(x0, u_orig.unsqueeze(), static_cast<float>(old_dt))
+                    .squeeze();
+  if (x_orig.shape(0) != N + 1 || x_orig.shape(1) != x0.shape(0))
+    throw std::runtime_error("Expected N+1 states from coarse rollout");
+
+  Tensor<float, 2> x_fine(Memory::Host, steps + 1, x0.shape(0));
+  Tensor<float, 2> u_fine(Memory::Host, steps, u_orig.shape(1));
+  for (int k = 0; k <= steps; ++k)
+  {
+    const double position = std::min(k * new_dt / old_dt, double(N));
+    const int left = static_cast<int>(std::floor(position));
+    const int right = std::min(left + 1, N);
+    const float w = static_cast<float>(position - left);
+    for (int j = 0; j < x0.shape(0); ++j)
+      x_fine(k, j) = (1.0f - w) * x_orig(left, j) + w * x_orig(right, j);
+    if (k == steps) break;
+
+    const double u_position = std::min(position, double(N - 1));
+    const int u_left = static_cast<int>(std::floor(u_position));
+    const int u_right = std::min(u_left + 1, N - 1);
+    const float u_w = static_cast<float>(u_position - u_left);
+    for (int j = 0; j < u_orig.shape(1); ++j)
+      u_fine(k, j) =
+          (1.0f - u_w) * u_orig(u_left, j) + u_w * u_orig(u_right, j);
+  }
+  return {std::move(x_fine), std::move(u_fine)};
+}
+
 // Reroll a trajectory at a finer dt using ZoH
 std::pair<Tensor<float, 2>, Tensor<float, 2>> zoh_reroll(
     RolloutProvider<float> auto& plant, const TensorView<float, 2>& u_traj_orig,
@@ -277,6 +360,33 @@ std::pair<Tensor<float, 2>, Tensor<float, 2>> zoh_reroll_variable_time(
     int source = std::min(
         static_cast<int>(std::floor(k * new_dt / old_dt)), u_orig.shape(0) - 1);
     u_fine.slice_1d<1>(k).deep_copy_from(u_orig.slice_1d<1>(source));
+  }
+  auto x_fine = plant(x0, u_fine.view().unsqueeze(), static_cast<float>(new_dt))
+                    .squeeze();
+  return {std::move(x_fine), std::move(u_fine)};
+}
+
+// Resample the piecewise-linear control tape on the fine physical-time grid.
+// Hold the final control after its last knot, including any padded interval.
+std::pair<Tensor<float, 2>, Tensor<float, 2>> foh_reroll_variable_time(
+    RolloutProvider<float> auto& plant, const TensorView<float, 2>& u_orig,
+    const TensorView<float, 1>& x0, double old_dt, double new_dt)
+{
+  if (!std::isfinite(old_dt) || !std::isfinite(new_dt) || old_dt <= 0.0 ||
+      new_dt <= 0.0 || u_orig.shape(0) < 1)
+    throw std::invalid_argument(
+        "Invalid variable-time reroll horizon or timestep");
+  int steps = static_cast<int>(std::ceil(u_orig.shape(0) * old_dt / new_dt));
+  Tensor<float, 2> u_fine(steps, u_orig.shape(1));
+  for (int k = 0; k < steps; ++k)
+  {
+    double position =
+        std::min(k * new_dt / old_dt, double(u_orig.shape(0) - 1));
+    int left = static_cast<int>(std::floor(position));
+    int right = std::min(left + 1, u_orig.shape(0) - 1);
+    float w = static_cast<float>(position - left);
+    for (int j = 0; j < u_orig.shape(1); ++j)
+      u_fine(k, j) = (1.0f - w) * u_orig(left, j) + w * u_orig(right, j);
   }
   auto x_fine = plant(x0, u_fine.view().unsqueeze(), static_cast<float>(new_dt))
                     .squeeze();

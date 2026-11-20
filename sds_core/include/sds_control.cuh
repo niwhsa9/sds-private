@@ -22,6 +22,13 @@
 namespace sds
 {
 
+// Optional context for stochastic costs. Legacy cost signatures still work.
+struct CEMCostContext
+{
+  int iteration;
+  int batch_index;
+};
+
 // concept Cost = ... TODO(amg)
 
 template <typename T, typename... Dims>
@@ -152,14 +159,19 @@ template <typename Cost>
 __global__ void cost_kernel(
     Cost cost, TensorView<float, 3> x_seq,  // [N, T+1, n_x]
     TensorView<float, 3> u_seq,             // [N, T,   n_u]
-    TensorView<float, 1> costs)             // [N]
+    TensorView<float, 1> costs,             // [N]
+    int iteration = 0)
 {
   int b = blockIdx.x * blockDim.x + threadIdx.x;
   if (b >= x_seq.shape(0)) return;
   // 2-D views for this rollout — fix batch dim (0) at b.
   auto x_b = x_seq.slice<0>(b);  // [T+1, n_x]
   auto u_b = u_seq.slice<0>(b);  // [T,   n_u]
-  costs(b) = cost(x_b, u_b);
+  const CEMCostContext context{iteration, b};
+  if constexpr (requires { cost(x_b, u_b, context); })
+    costs(b) = cost(x_b, u_b, context);
+  else
+    costs(b) = cost(x_b, u_b);
 }
 
 template <
@@ -178,7 +190,7 @@ void cem(
     auto x_samples = plant(x0, u_samples, dt);  // [N, T+1, n_x]
 
     cost_kernel<<<(n_samples + 255) / 256, 256>>>(
-        cost, x_samples, u_samples, costs);
+        cost, x_samples, u_samples, costs, iter);
     cudaDeviceSynchronize();
 
     cem_mean_std(u_mean, u_std_dev, u_samples, costs, n_elites);
@@ -316,11 +328,18 @@ __global__ void variable_time_cost_kernel(Cost cost,
                                           TensorView<float, 3> x_seq,
                                           TensorView<float, 3> u_seq,
                                           TensorView<float, 1> dts,
-                                          TensorView<float, 1> costs)
+                                          TensorView<float, 1> costs,
+                                          int iteration = 0)
 {
   int b = blockIdx.x * blockDim.x + threadIdx.x;
-  if (b < x_seq.shape(0))
-    costs(b) = cost(x_seq.slice<0>(b), u_seq.slice<0>(b), dts(b));
+  if (b >= x_seq.shape(0)) return;
+  const auto x_b = x_seq.slice<0>(b);
+  const auto u_b = u_seq.slice<0>(b);
+  const CEMCostContext context{iteration, b};
+  if constexpr (requires { cost(x_b, u_b, dts(b), context); })
+    costs(b) = cost(x_b, u_b, dts(b), context);
+  else
+    costs(b) = cost(x_b, u_b, dts(b));
 }
 
 struct VariableTimeCEMResult
@@ -329,8 +348,8 @@ struct VariableTimeCEMResult
   float dt;
 };
 
-// Cost signature: cost(x_seq, u_seq, candidate_dt). Existing cem() is
-// unchanged.
+// Costs may optionally accept CEMCostContext after candidate_dt.
+// Legacy fixed-time and variable-time cost signatures remain supported.
 template <VariableTimeRolloutProvider<float> P, typename Cost,
           typename PreemptFn = std::nullptr_t>
 VariableTimeCEMResult cem_variable_time(
@@ -379,7 +398,7 @@ VariableTimeCEMResult cem_variable_time(
     }
     auto x_samples = plant(x0, samples.view(), dts.view());
     variable_time_cost_kernel<<<(n_samples + 255) / 256, 256>>>(
-        cost, x_samples.view(), samples.view(), dts.view(), costs.view());
+        cost, x_samples.view(), samples.view(), dts.view(), costs.view(), iter);
     CUDA_CHECK(cudaDeviceSynchronize());
     // Invalid rollouts cannot silently win elite selection (NaNs break
     // sorting).

@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 
@@ -31,6 +32,10 @@ struct InfiniteHorizonPolicy
   Tensor<float, 2> K, P;
   Tensor<float, 1> x_reference, u_reference;
   std::optional<Tensor<float, 1>> u_lower, u_upper;
+  // Optional nonlinear state error in the gain's coordinate system. Receives
+  // current and reference states; must return nX entries. Without it, use
+  // ordinary x - x_reference. Captures must own their data for policy copies.
+  std::function<Eigen::VectorXf(const float*, const float*)> state_error;
 
   InfiniteHorizonPolicy(Tensor<float, 2>&& K_, Tensor<float, 2>&& P_,
                         Tensor<float, 1>&& x_reference_,
@@ -50,7 +55,7 @@ struct InfiniteHorizonPolicy
       : K(other.K.clone()),
         P(other.P.clone()),
         x_reference(other.x_reference.clone()),
-        u_reference(other.u_reference.clone())
+        u_reference(other.u_reference.clone()), state_error(other.state_error)
   {
     if (other.u_lower) u_lower = other.u_lower->clone();
     if (other.u_upper) u_upper = other.u_upper->clone();
@@ -70,6 +75,15 @@ struct InfiniteHorizonPolicy
         (u_upper && u_upper->shape(0) != nu))
       throw std::invalid_argument(
           "Infinite-horizon input bound dimension mismatch");
+    Eigen::VectorXf error;
+    if (state_error)
+    {
+      error = state_error(x, x_reference.data());
+      if (error.size() != nx)
+        throw std::invalid_argument("Infinite-horizon state error dimension mismatch");
+      if (!error.allFinite())
+        throw std::runtime_error("Nonfinite infinite-horizon state error");
+    }
     Tensor<float, 1> u(Memory::Host, nu);
     for (int j = 0; j < nu; ++j)
     {
@@ -77,7 +91,9 @@ struct InfiniteHorizonPolicy
       for (int i = 0; i < nx; ++i)
       {
         // Ignore unobserved states, including application-specific manifolds.
-        if (K(i, j) != 0.0f) value += K(i, j) * double(x[i] - x_reference(i));
+        if (K(i, j) != 0.0f)
+          value += K(i, j) * (state_error ? double(error(i))
+                                         : double(x[i] - x_reference(i)));
       }
       if (!std::isfinite(value))
         throw std::runtime_error("Nonfinite infinite-horizon command");
