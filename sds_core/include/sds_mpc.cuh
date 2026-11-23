@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 #include "sds_core.cuh"
 #include "sds_tvlqr.cuh"
@@ -25,17 +26,19 @@ class ReplanManager
   ReplanManager(P&& plant, std::shared_ptr<PolicyOptimizer> p)
       : plant(std::move(plant)), optimizer(p)
   {
-    std::thread replan_loop(
-        [&]()
+    replan_thread = std::thread(
+        [this]()
         {
           while (true)
           {
             std::unique_lock<std::mutex> lock(replan_mutex);
-            replan_cv.wait(lock, [&]() { return state == REQUESTED; });
+            replan_cv.wait(lock, [&]() { return stopping || state == REQUESTED; });
+            if (stopping) return;
             lock.unlock();
             auto plan_start_time = std::chrono::steady_clock::now();
             auto policy = replan();
             lock.lock();
+            if (stopping) return;
             last_replan_time =
                 std::chrono::steady_clock::now() - plan_start_time;
             new_policy = std::move(policy);
@@ -46,7 +49,17 @@ class ReplanManager
                                 // matters for request_replan_blocking
           }
         });
-    replan_loop.detach();
+  }
+
+  ~ReplanManager()
+  {
+    {
+      std::lock_guard<std::mutex> lock(replan_mutex);
+      stopping = true;
+    }
+    replan_cv.notify_all();
+    // Finish an in-flight solve before destroying its plant/optimizer or CV.
+    if (replan_thread.joinable()) replan_thread.join();
   }
 
   // Triggers a replan and invalidates the internally-held policy if one exists
@@ -159,6 +172,8 @@ class ReplanManager
   P plant;
 
   std::chrono::duration<double> last_replan_time;
+  bool stopping = false;
+  std::thread replan_thread;
 };
 
 // This is just a helper function for the most common replanning loop logic. The

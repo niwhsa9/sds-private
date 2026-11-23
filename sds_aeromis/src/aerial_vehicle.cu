@@ -40,6 +40,23 @@ __device__ __host__ void AerialVehicle<Mem, Scalar>::dynamics(
 }
 
 template <typename Mem, typename Scalar>
+__host__ bool AerialVehicle<Mem, Scalar>::thrust_is_delayed(int i) const
+{
+  return aerial_vehicle_cpu_->get_description()->thrust_sources[i].delay > 0;
+}
+
+template <typename Mem, typename Scalar>
+__host__ __device__ void AerialVehicle<Mem, Scalar>::advance_delayed_actuators(
+    Scalar h, const Scalar* x, const Scalar* u, Scalar* out) const
+{
+#ifdef __CUDA_ARCH__
+  aerial_vehicle_->advance_delayed_actuators(h, x, u, out);
+#else
+  aerial_vehicle_cpu_->advance_delayed_actuators(h, x, u, out);
+#endif
+}
+
+template <typename Mem, typename Scalar>
 __host__ __device__ int AerialVehicle<Mem, Scalar>::get_n_x() const
 {
   return n_x;

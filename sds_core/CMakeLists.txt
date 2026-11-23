@@ -120,6 +120,11 @@ target_compile_options(dubin_cem PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-l
 #
 include(CTest)
 if(BUILD_TESTING)
+  find_package(Threads REQUIRED)
+  add_executable(replan_shutdown_test test/replan_shutdown.cu)
+  target_link_libraries(replan_shutdown_test sds_core Threads::Threads)
+  add_test(NAME replan_shutdown COMMAND replan_shutdown_test)
+  set_tests_properties(replan_shutdown PROPERTIES TIMEOUT 10)
   add_executable(infinite_horizon_lqr_test test/infinite_horizon_lqr.cu)
   target_link_libraries(infinite_horizon_lqr_test sds_core)
   add_test(NAME infinite_horizon_lqr COMMAND infinite_horizon_lqr_test)

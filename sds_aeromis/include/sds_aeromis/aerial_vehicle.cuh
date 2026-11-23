@@ -25,6 +25,17 @@ class AerialVehicle
   __device__ __host__ void dynamics(
       Scalar t, const Scalar* x, const Scalar* u, Scalar* dxdt);
 
+  __host__ __device__ bool has_thrust_delay() const
+  {
+    return n_x > 13 + n_u;
+  }
+
+  // Host queries are used to preserve legacy estimates for undelayed motors.
+  __host__ bool thrust_is_delayed(int source_index) const;
+
+  __host__ __device__ void advance_delayed_actuators(
+      Scalar h, const Scalar* x, const Scalar* u, Scalar* out) const;
+
   __host__ __device__ int get_n_x() const;
   __host__ __device__ int get_n_u() const;
 

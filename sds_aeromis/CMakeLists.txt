@@ -99,6 +99,11 @@ find_package(ament_cmake REQUIRED)
 # find_package(<dependency> REQUIRED)
 
 if(BUILD_TESTING)
+  add_executable(aerial_vehicle_integrator_test test/aerial_vehicle_integrator_test.cu)
+  target_link_libraries(aerial_vehicle_integrator_test sds_aeromis)
+  set_target_properties(aerial_vehicle_integrator_test PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  add_test(NAME aerial_vehicle_integrator_test COMMAND aerial_vehicle_integrator_test)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
