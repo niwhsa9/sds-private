@@ -146,7 +146,8 @@ template class AerialVehicle<aeromis_core::CPU, double>;
 // ---------------------------------------------------------------------------
 
 __host__ AerialVehicleManager::AerialVehicleManager(
-    const std::filesystem::path& description_path)
+    const std::filesystem::path& description_path,
+    std::optional<std::string> flow_field_path)
 {
   aeromis_core::AerialVehicleDescription<aeromis_core::GPU, float> description(
       description_path);
@@ -155,7 +156,7 @@ __host__ AerialVehicleManager::AerialVehicleManager(
 
   aerial_vehicle_gpu_ =
       std::make_unique<aeromis_core::AerialVehicle<aeromis_core::GPU, float>>(
-          std::move(description));
+          std::move(description), flow_field_path);
   aerial_vehicle_gpu_->copy_members_to_gpu(
       aerial_vehicle_gpu_->get_gpu_instance());
   cudaMallocManaged(
@@ -164,7 +165,7 @@ __host__ AerialVehicleManager::AerialVehicleManager(
 
   aerial_vehicle_cpu_ =
       std::make_unique<aeromis_core::AerialVehicle<aeromis_core::CPU, double>>(
-          std::move(description_cpu));
+          std::move(description_cpu), flow_field_path);
   cpu_memory_buffer.resize(
       aerial_vehicle_cpu_->required_bytes_per_thread() * 1024);
 }

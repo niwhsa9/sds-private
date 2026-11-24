@@ -2,6 +2,7 @@
 
 #include <aeromis_core/dynamical_systems/aerial_vehicle.hpp>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,7 +72,8 @@ class AerialVehicleManager
 {
  public:
   __host__ explicit AerialVehicleManager(
-      const std::filesystem::path& description_path);
+      const std::filesystem::path& description_path,
+      std::optional<std::string> flow_field_path = std::nullopt);
 
   __device__ __host__ ~AerialVehicleManager();
 

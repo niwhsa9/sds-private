@@ -120,11 +120,12 @@ __host__ __device__ void rollout(
     int batch_idx, Sys& sys, Integrator& integrator,
     const TensorView<typename Sys::ScalarType, 1>& x0,
     TensorView<typename Sys::ScalarType, 3> u_seq, typename Sys::ScalarType dt,
-    TensorView<typename Sys::ScalarType, 3> x_seq)
+    TensorView<typename Sys::ScalarType, 3> x_seq,
+    typename Sys::ScalarType start_time = 0)
 {
   int T = u_seq.shape(1);
   x_seq.template slice_1d<2>(batch_idx, 0).deep_copy_from(x0);
-  float t = 0.0;
+  typename Sys::ScalarType t = start_time;
   for (int i = 0; i < T; ++i)
   {
     if constexpr (BoundedSystem<Sys>)
@@ -200,14 +201,14 @@ Tensor<typename Sys::ScalarType, 3> rollout_gpu(
 template <DynamicalSystem Sys, typename Integrator>
 Tensor<typename Sys::ScalarType, 3> rollout_cpu(
     Sys& sys, Integrator& integrator, const TensorView<double, 1>& x0,
-    TensorView<double, 3>& u_seq, float dt)
+    TensorView<double, 3>& u_seq, float dt, double start_time = 0.0)
 {
   int batch_size = u_seq.shape(0);
   int T = u_seq.shape(1);
   int n_x = sys.get_n_x();
   Tensor<double, 3> x_seq(batch_size, T + 1, n_x);
   for (int b = 0; b < batch_size; ++b)
-    rollout(b, sys, integrator, x0, u_seq, dt, x_seq.view());
+    rollout(b, sys, integrator, x0, u_seq, dt, x_seq.view(), start_time);
   return x_seq;
 }
 
@@ -283,13 +284,14 @@ Tensor<typename Sys::ScalarType, 3> rollout_gpu(
 template <DynamicalSystem Sys, typename Integrator>
 Tensor<typename Sys::ScalarType, 3> rollout_cpu(
     Sys& sys, Integrator& integrator, const TensorView<double, 1>& x0,
-    TensorView<double, 3>& u_seq, const TensorView<float, 1>& dts)
+    TensorView<double, 3>& u_seq, const TensorView<float, 1>& dts,
+    double start_time = 0.0)
 {
   validate_rollout_dts(dts, u_seq.shape(0));
   Tensor<double, 3> x_seq(u_seq.shape(0), u_seq.shape(1) + 1, sys.get_n_x());
   for (int b = 0; b < u_seq.shape(0); ++b)
     rollout(b, sys, integrator, x0, u_seq, static_cast<double>(dts(b)),
-            x_seq.view());
+            x_seq.view(), start_time);
   return x_seq;
 }
 
